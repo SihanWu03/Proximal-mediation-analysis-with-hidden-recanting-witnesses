@@ -1,21 +1,20 @@
 import numpy as np
 import pickle
 import os
-import json
 import pandas as pd
 from scipy import stats
 from sklearn.model_selection import KFold
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
-# 导入自定义模块
-import por, pipw, phe, pmr, allestimator
+# Import custom modules
+import allestimator
 
 estimator = allestimator.AllEstimator
 
 def run_naive_dr_fold(data_fit, data_test):
     """
-    【修改】：不仅返回 DR 的均值估计量，还要返回每个样本的 point-wise score，
-    从而可以在外部构建 DR 的影响函数 (EIF)
+    Calculate the naive DR estimator and return the point-wise score for each sample
+    to construct the DR influence function (EIF) externally.
     """
     X_train = data_fit['x']
     A_train = data_fit['a'].flatten()
@@ -25,25 +24,25 @@ def run_naive_dr_fold(data_fit, data_test):
     A_test = data_test['a'].flatten()
     Y_test = data_test['y'].flatten()
     
-    # 1. 倾向得分模型 P(A|X) 
+    # 1. Propensity score model P(A|X) 
     pi_model = RandomForestClassifier(n_estimators=300, max_depth=10, min_samples_leaf=2, random_state=100)
     pi_model.fit(X_train, A_train)
     p_a0_test = np.clip(pi_model.predict_proba(X_test)[:, 0], 0.05, 0.95)
     
-    # 2. 结果回归模型 E(Y|A=0, X)
+    # 2. Outcome regression model E(Y|A=0, X)
     mu_model = RandomForestRegressor(n_estimators=300, max_depth=10, min_samples_leaf=2, random_state=100)
     mu_model.fit(X_train[A_train == 0], Y_train[A_train == 0])
     mu0_test = mu_model.predict(X_test)
     
-    # 3. 执行 DR 公式计算 Y(0) 的 point-wise score (即 \psi(O_i))
+    # 3. Execute DR formula to calculate the point-wise score of Y(0) (i.e., \psi(O_i))
     a0_ind = (A_test == 0).astype(float)
     dr_y0_pointwise = (a0_ind * (Y_test - mu0_test) / p_a0_test) + mu0_test
     
-    # 返回每个样本的 score 和 该折的均值
+    # Return the score for each sample and the mean for this fold
     return dr_y0_pointwise, np.mean(dr_y0_pointwise)
 
 def compute_influence_function_pmr(model, data, psi_hat):
-    """原有 PMR 影响函数逻辑保持不变"""
+    """Compute the PMR influence function."""
     a, y, x, w, z, m2 = data['a'][:, 0], data['y'][:, 0], data['x'], data['w'], data['z'], data['m2']
     probs = model.treatment_prob_model.predict_proba(x)
     p_a1, p_a0 = probs[:, 1], probs[:, 0]
@@ -66,12 +65,12 @@ def cross_fitting_estimate_realdata(data_dict, n_splits=5, num_runs=10, seed=100
     
     fold_results = {'por': [], 'pipw': [], 'phe': [], 'pmr': [], 'dr_y0': []}
     
-    # 【新增】：同时记录 PMR 和 DR 的样本级影响函数 (EIF)
+    # Simultaneously record the sample-level influence functions (EIF) for PMR and DR
     sample_if_pmr = np.zeros(n)
     sample_if_dr = np.zeros(n)
 
     for fold_idx, (train_val_idx, test_idx) in enumerate(kf.split(np.arange(n))):
-        print(f"正在拟合第 {fold_idx + 1}/{n_splits} 折...")
+        print(f"Fitting fold {fold_idx + 1}/{n_splits}...")
         
         tv_data = {k: v[train_val_idx] for k, v in data_dict.items()}
         test_data = {k: v[test_idx] for k, v in data_dict.items()}
@@ -79,11 +78,11 @@ def cross_fitting_estimate_realdata(data_dict, n_splits=5, num_runs=10, seed=100
         fit_data = tv_data
         val_data = tv_data
 
-        # 1. PMR 模型拟合
+        # 1. PMR model fitting
         model = estimator(num_runs=num_runs)
         model.fit(fit_data=fit_data, val_data=val_data)
 
-        # 2. 计算各个路径估计量与 PMR EIF
+        # 2. Calculate various path estimators and the PMR EIF
         fold_results['por'].append(np.mean(model.evaluatepor(test_data)))
         fold_results['pipw'].append(np.mean(model.evaluatepipw(test_data)))
         fold_results['phe'].append(np.mean(model.evaluatephe(test_data)))
@@ -92,24 +91,25 @@ def cross_fitting_estimate_realdata(data_dict, n_splits=5, num_runs=10, seed=100
         fold_results['pmr'].append(pmr_est)
         sample_if_pmr[test_idx] = compute_influence_function_pmr(model, test_data, pmr_est)
 
-        # 3. 计算 DR 估计量与 DR EIF
+        # 3. Calculate the DR estimator and the DR EIF
         dr_scores, dr_est = run_naive_dr_fold(fit_data, test_data)
         fold_results['dr_y0'].append(dr_est)
-        # DR 的 EIF 就是 point-wise score 减去均值
+        
+        # The DR EIF is the point-wise score minus the mean
         sample_if_dr[test_idx] = dr_scores - dr_est
 
-    # 汇总点估计
+    # Summarize point estimates
     res = {f'{k}_estimate': np.mean(v) for k, v in fold_results.items()}
     
     # -------------------------------------------------------------
-    # 【核心计算】：计算 目标差值 (PMR - DR) 的推断统计量
+    # Core calculation: Calculate inference statistics for the target difference (PMR - DR)
     # -------------------------------------------------------------
     res['diff_estimate'] = res['pmr_estimate'] - res['dr_y0_estimate']
     
-    # 影响函数的线性组合: EIF(A - B) = EIF(A) - EIF(B)
+    # Linear combination of influence functions: EIF(A - B) = EIF(A) - EIF(B)
     sample_if_diff = sample_if_pmr - sample_if_dr
     
-    # 计算差异的方差与标准误
+    # Calculate the variance and standard error of the difference
     diff_var = np.var(sample_if_diff, ddof=1) / n
     diff_se = np.sqrt(diff_var)
     z_val = stats.norm.ppf(0.975)
@@ -120,7 +120,7 @@ def cross_fitting_estimate_realdata(data_dict, n_splits=5, num_runs=10, seed=100
         'diff_ci': [res['diff_estimate'] - z_val * diff_se, res['diff_estimate'] + z_val * diff_se]
     })
     
-    # 附带计算原 PMR 的推断 (仅作参考)
+    # Calculate inference for the original PMR (for reference only)
     pmr_se = np.sqrt(np.var(sample_if_pmr, ddof=1) / n)
     res.update({
         'pmr_se': pmr_se,
@@ -130,26 +130,33 @@ def cross_fitting_estimate_realdata(data_dict, n_splits=5, num_runs=10, seed=100
     return res
 
 def main():
-    base_dir = r'D:\code\simulation\simulation'
-    with open(os.path.join(base_dir, 'processed_data_dict.pkl'), 'rb') as f:
+    # Dynamically locate the directory of the current script
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    data_path = os.path.join(current_dir, 'processed_data_dict.pkl')
+    
+    # Note: If you choose to put the data in a dedicated 'data' subfolder in your repo, 
+    # you can change the above line to:
+    # data_path = os.path.join(current_dir, 'data', 'processed_data_dict.pkl')
+
+    with open(data_path, 'rb') as f:
         data_dict = pickle.load(f)
 
-    print("开始分析...")
+    print("Starting analysis...")
     res = cross_fitting_estimate_realdata(data_dict)
 
     print("\n" + "="*60)
-    print("📋 因果路径效应对比分析 (PMR 效应 vs. 朴素基准 E[Y(0)])")
+    print("📋 Causal Path Effect Comparative Analysis (PMR Effect vs. Naive Baseline E[Y(0)])")
     print("="*60)
-    print(f"[1] 基准期望 E[Y(0)] (DR估计):          {res['dr_y0_estimate']:.4f}")
-    print(f"[2] 路径效应 E[Y(M2(1), M1(0), 0)] (PMR): {res['pmr_estimate']:.4f}")
+    print(f"[1] Baseline Expectation E[Y(0)] (DR Estimate):          {res['dr_y0_estimate']:.4f}")
+    print(f"[2] Path Effect E[Y(M2(1), M1(0), 0)] (PMR):             {res['pmr_estimate']:.4f}")
     print("-" * 60)
-    print(f"🎯 核心目标差异值 [2] - [1]:             {res['diff_estimate']:.4f}")
-    print(f"   => 差异方差 (Variance):               {res['diff_var']:.6f}")
-    print(f"   => 差异标准误 (SE):                   {res['diff_se']:.4f}")
-    print(f"   => 差异 95% 置信区间 (CI):            [{res['diff_ci'][0]:.4f}, {res['diff_ci'][1]:.4f}]")
+    print(f"🎯 Core Target Difference [2] - [1]:                     {res['diff_estimate']:.4f}")
+    print(f"   => Difference Variance:                               {res['diff_var']:.6f}")
+    print(f"   => Difference Standard Error (SE):                    {res['diff_se']:.4f}")
+    print(f"   => Difference 95% Confidence Interval (CI):           [{res['diff_ci'][0]:.4f}, {res['diff_ci'][1]:.4f}]")
     print("="*60)
-    print(f"其他补充信息:")
-    print(f"PMR 单独 95% CI: [{res['pmr_ci'][0]:.4f}, {res['pmr_ci'][1]:.4f}]")
+    print(f"Other supplementary information:")
+    print(f"PMR isolated 95% CI: [{res['pmr_ci'][0]:.4f}, {res['pmr_ci'][1]:.4f}]")
     print(f"POR={res['por_estimate']:.2f}, PIPW={res['pipw_estimate']:.2f}, PHE={res['phe_estimate']:.2f}")
 
 if __name__ == "__main__":
