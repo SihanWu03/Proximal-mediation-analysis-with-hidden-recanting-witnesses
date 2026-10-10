@@ -19,7 +19,6 @@ requirements.txt             Simulation dependencies
 requirements-application.txt Application dependencies
 ```
 
-No simulation results, fitted calibration, or application estimates are included. Scripts write newly generated files to `outputs/` by default; these files are excluded from version control.
 
 ## Installation
 
