@@ -1,0 +1,7 @@
+# Numerical environment used for the ACTG175 calibration and application.
+numpy==1.26.4
+scipy==1.15.1
+scikit-learn==1.6.1
+torch==2.5.0
+pandas==2.2.3
+matplotlib==3.9.2
