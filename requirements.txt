@@ -1,7 +1,0 @@
-# Numerical environment used for the manuscript simulation studies.
-numpy==2.4.4
-scipy==1.17.1
-scikit-learn==1.8.0
-torch==2.11.0
-pandas>=2.2,<4
-matplotlib>=3.9,<4
